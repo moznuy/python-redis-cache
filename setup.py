@@ -20,5 +20,5 @@ setup(
     python_requires='>=3.6',
     packages=find_packages(),
     setup_requires=['pytest-runner==5.3.1'],
-    tests_require=['pytest==6.2.5', 'redis==4.4.4'],
+    tests_require=['pytest==7.4.1', 'pytest-asyncio==0.21.1', 'redis==4.4.4'],
 )

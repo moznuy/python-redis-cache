@@ -231,3 +231,70 @@ class CacheDecorator:
         chunks_gen = chunks(self.client.scan_iter(f'{self.get_full_prefix()}:*'), 500)
         for keys in chunks_gen:
             self.client.delete(*keys)
+
+
+# TODO: A lot of similar code
+class AsyncRedisCache(RedisCache):
+    def cache(self, ttl=0, limit=0, namespace=None, exception_handler=None):
+        return AsyncCacheDecorator(
+            redis_client=self.client,
+            prefix=self.prefix,
+            serializer=self.serializer,
+            deserializer=self.deserializer,
+            key_serializer=self.key_serializer,
+            ttl=ttl,
+            limit=limit,
+            namespace=namespace,
+            exception_handler=exception_handler or self.exception_handler
+        )
+
+
+# TODO: A lot of similar code
+class AsyncCacheDecorator(CacheDecorator):
+    def __call__(self, cf):
+        self.namespace = self.namespace or f'{cf.__module__}.{cf.__qualname__}'
+        self.keys_key = f'{self.get_full_prefix()}:keys'
+        self.original_fn = cf
+
+        @wraps(cf)
+        async def inner(*args, **kwargs):
+            nonlocal self
+            key = self.get_key(args, kwargs)
+            result = None
+
+            exception_handled = False
+            try:
+                result = await self.client.get(key)
+            except Exception as e:
+                if self.exception_handler:
+                    # This allows people to handle failures in cache lookups
+                    exception_handled = True
+                    parsed_result = self.exception_handler(e, self.original_fn, args, kwargs)
+            if result:
+                parsed_result = self.deserializer(result)
+            elif not exception_handled:
+                parsed_result = await cf(*args, **kwargs)
+                result_serialized = self.serializer(parsed_result)
+                await get_cache_lua_fn(self.client)(keys=[key, self.keys_key], args=[result_serialized, self.ttl, self.limit])
+
+            return parsed_result
+
+        inner.invalidate = self.invalidate
+        inner.invalidate_all = self.invalidate_all
+        inner.get_full_prefix = self.get_full_prefix
+        inner.instance = self
+        return inner
+
+    async def invalidate(self, *args, **kwargs):
+        key = self.get_key(args, kwargs)
+        async with self.client.pipeline() as pipe:
+            pipe.delete(key)
+            pipe.zrem(self.keys_key, key)
+            await pipe.execute()
+
+    async def invalidate_all(self, *args, **kwargs):
+        # TODO: write async chunks generator
+        keys = [key for key in self.client.scan_iter(f'{self.get_full_prefix()}:*')]
+        chunks_gen = chunks(keys, 500)
+        for keys in chunks_gen:
+            await self.client.delete(*keys)
